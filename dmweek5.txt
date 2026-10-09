@@ -1,0 +1,241 @@
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.datasets import load_iris
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.preprocessing import LabelEncoder, StandardScaler, label_binarize
+from sklearn.pipeline import make_pipeline
+from sklearn.tree import DecisionTreeClassifier, export_text, plot_tree
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    cohen_kappa_score,
+    confusion_matrix,
+    classification_report,
+    roc_auc_score,
+    RocCurveDisplay
+)
+
+# --------------------------------------------------
+# LOAD DATASETS
+# --------------------------------------------------
+
+def load_datasets():
+    datasets = {}
+
+    # Iris dataset
+    iris = load_iris()
+    datasets["Iris"] = (
+        pd.DataFrame(iris.data, columns=iris.feature_names),
+        pd.Series(iris.target),
+        iris.target_names
+    )
+
+    # Weather nominal dataset (built-in sample data)
+    weather = pd.DataFrame({
+        "outlook": [
+            "sunny", "sunny", "overcast", "rainy",
+            "rainy", "rainy", "overcast", "sunny",
+            "sunny", "rainy", "sunny", "overcast",
+            "overcast", "rainy"
+        ],
+        "temperature": [
+            "hot", "hot", "hot", "mild", "cool", "cool",
+            "cool", "mild", "cool", "mild", "mild",
+            "mild", "hot", "mild"
+        ],
+        "humidity": [
+            "high", "high", "high", "high", "normal",
+            "normal", "normal", "high", "normal", "normal",
+            "normal", "high", "normal", "high"
+        ],
+        "windy": [
+            "FALSE", "TRUE", "FALSE", "FALSE", "FALSE",
+            "TRUE", "TRUE", "FALSE", "FALSE", "FALSE",
+            "TRUE", "TRUE", "FALSE", "TRUE"
+        ],
+        "play": [
+            "no", "no", "yes", "yes", "yes", "no",
+            "yes", "no", "yes", "yes", "yes", "yes",
+            "yes", "no"
+        ]
+    })
+
+    X_weather = pd.get_dummies(weather.drop(columns="play"))
+    y_weather = LabelEncoder().fit_transform(weather["play"])
+
+    datasets["Weather"] = (
+        X_weather,
+        pd.Series(y_weather),
+        ["no", "yes"]
+    )
+
+    # Glass dataset: download glass.data from the UCI
+    # repository and place it beside this Python file.
+    try:
+        glass = pd.read_csv("glass.data", header=None)
+        glass = glass.iloc[:, 1:]  # Remove ID column
+        X_glass = glass.iloc[:, :-1]
+        y_glass = glass.iloc[:, -1]
+
+        datasets["Glass"] = (
+            X_glass,
+            pd.Series(LabelEncoder().fit_transform(y_glass)),
+            sorted(y_glass.unique().astype(str))
+        )
+    except FileNotFoundError:
+        print("glass.data not found. Skipping Glass dataset.")
+
+    return datasets
+
+
+# --------------------------------------------------
+# CLASSIFIERS
+# --------------------------------------------------
+
+classifiers = {
+    "ID3": DecisionTreeClassifier(
+        criterion="entropy",
+        random_state=42
+    ),
+    "J48": DecisionTreeClassifier(
+        criterion="entropy",
+        min_samples_leaf=2,
+        random_state=42
+    ),
+    "Naive Bayes": GaussianNB(),
+    "k-NN (IBk)": make_pipeline(
+        StandardScaler(),
+        KNeighborsClassifier(n_neighbors=3)
+    )
+}
+
+
+# --------------------------------------------------
+# EVALUATION
+# --------------------------------------------------
+
+def evaluate_datasets():
+    datasets = load_datasets()
+    results = []
+
+    for dataset_name, (X, y, class_names) in datasets.items():
+        print("\n" + "=" * 60)
+        print("DATASET:", dataset_name)
+        print("=" * 60)
+
+        cv = StratifiedKFold(
+            n_splits=10,
+            shuffle=True,
+            random_state=42
+        )
+
+        for model_name, model in classifiers.items():
+            # Use out-of-fold predictions
+            predictions = cross_val_predict(
+                model, X, y, cv=cv
+            )
+
+            accuracy = accuracy_score(y, predictions)
+            kappa = cohen_kappa_score(y, predictions)
+            cm = confusion_matrix(y, predictions)
+
+            print("\nClassifier:", model_name)
+            print("Accuracy:", round(accuracy * 100, 2), "%")
+            print("Kappa:", round(kappa, 4))
+            print("Confusion Matrix:\n", cm)
+            print(
+                "Classification Report:\n",
+                classification_report(
+                    y, predictions, zero_division=0
+                )
+            )
+
+            results.append({
+                "Dataset": dataset_name,
+                "Classifier": model_name,
+                "Accuracy (%)": round(accuracy * 100, 2),
+                "Kappa": round(kappa, 4)
+            })
+
+            # Train model on complete dataset for tree output
+            if model_name in ["ID3", "J48"]:
+                model.fit(X, y)
+
+                if dataset_name == "Weather":
+                    print("Decision Tree:\n")
+                    print(export_text(model, feature_names=list(X.columns)))
+
+                if dataset_name == "Iris":
+                    plt.figure(figsize=(14, 8))
+                    plot_tree(
+                        model,
+                        feature_names=list(X.columns),
+                        class_names=list(class_names),
+                        filled=True,
+                        rounded=True
+                    )
+                    plt.title(f"{dataset_name} - {model_name}")
+                    plt.tight_layout()
+                    plt.savefig(
+                        f"{dataset_name}_{model_name}_tree.png"
+                    )
+                    plt.close()
+
+        # ROC curves using Iris and Weather, with multiclass support
+        plt.figure(figsize=(8, 6))
+
+        for model_name, model in classifiers.items():
+            try:
+                if len(set(y)) == 2:
+                    probabilities = cross_val_predict(
+                        model, X, y, cv=cv,
+                        method="predict_proba"
+                    )[:, 1]
+
+                    RocCurveDisplay.from_predictions(
+                        y, probabilities, name=model_name
+                    )
+                else:
+                    probabilities = cross_val_predict(
+                        model, X, y, cv=cv,
+                        method="predict_proba"
+                    )
+
+                    y_binary = label_binarize(
+                        y, classes=sorted(set(y))
+                    )
+
+                    auc = roc_auc_score(
+                        y_binary,
+                        probabilities,
+                        multi_class="ovr",
+                        average="macro"
+                    )
+
+                    print(
+                        model_name,
+                        "Macro ROC-AUC:",
+                        round(auc, 4)
+                    )
+
+            except (ValueError, AttributeError) as error:
+                print("ROC unavailable:", model_name, error)
+
+        plt.title(f"{dataset_name} - ROC Curves")
+        plt.tight_layout()
+        plt.savefig(f"{dataset_name}_ROC.png")
+        plt.close()
+
+    # Comparison table
+    result_df = pd.DataFrame(results)
+    print("\nFINAL COMPARISON")
+    print(result_df.to_string(index=False))
+
+    result_df.to_csv("classification_results.csv", index=False)
+
+
+if __name__ == "__main__":
+    evaluate_datasets()
